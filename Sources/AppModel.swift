@@ -5,16 +5,22 @@ import Combine
 @MainActor
 final class AppModel: ObservableObject {
     static let serverKey = "dsh.server.url"
+    static let hostsKey = "dsh.saved.hosts"
 
-    /// Base origin of the DSH web host, e.g. `http://192.168.0.200:59714`. No trailing slash, no query.
+    /// Base origin of the active DSH web host, e.g. `http://192.168.0.200:59714`. No trailing slash, no query.
     @Published var serverURL: String {
         didSet { UserDefaults.standard.set(serverURL, forKey: Self.serverKey) }
+    }
+
+    /// Recently used origins, newest first. Each authority keeps its own 30-day cookie in the WebView.
+    @Published var savedHosts: [String] {
+        didSet { UserDefaults.standard.set(savedHosts, forKey: Self.hostsKey) }
     }
 
     /// One-shot `?token=` value. The host exchanges it for an HttpOnly cookie and 303s to `./`.
     @Published var pendingToken: String?
 
-    /// Set when the host answers 401: the cookie is gone or the authority changed.
+    /// Set when the host answers 401: the cookie is gone or this authority was never authenticated.
     @Published var needsToken: Bool = false
 
     /// Last transport-level failure (host off, wrong Wi-Fi, firewall).
@@ -25,6 +31,7 @@ final class AppModel: ObservableObject {
 
     init() {
         serverURL = UserDefaults.standard.string(forKey: Self.serverKey) ?? ""
+        savedHosts = UserDefaults.standard.stringArray(forKey: Self.hostsKey) ?? []
     }
 
     var isConfigured: Bool { !serverURL.isEmpty }
@@ -47,7 +54,25 @@ final class AppModel: ObservableObject {
         loadTicket = UUID()
     }
 
+    func remember(_ base: String) {
+        var next = savedHosts.filter { $0 != base }
+        next.insert(base, at: 0)
+        savedHosts = Array(next.prefix(6))
+    }
+
+    func remove(_ base: String) {
+        savedHosts = savedHosts.filter { $0 != base }
+    }
+
+    /// Switch to a saved origin. Its cookie (if any) lives in the shared WebView cookie store.
+    func select(_ base: String) {
+        serverURL = base
+        pendingToken = nil
+        reload()
+    }
+
     func forgetServer() {
+        if !serverURL.isEmpty { remove(serverURL) }
         serverURL = ""
         pendingToken = nil
         needsToken = false
