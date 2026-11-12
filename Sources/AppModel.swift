@@ -29,6 +29,18 @@ final class AppModel: ObservableObject {
     /// Bump to force the web view to (re)load.
     @Published var loadTicket = UUID()
 
+    /// Recent in-page diagnostics (JS errors, failed requests, websocket state), newest first.
+    @Published var diagnostics: [String] = []
+
+    func note(_ text: String) {
+        diagnostics.insert(text, at: 0)
+        if diagnostics.count > 10 { diagnostics.removeLast(diagnostics.count - 10) }
+    }
+
+    func clearDiagnostics() {
+        diagnostics = []
+    }
+
     init() {
         serverURL = UserDefaults.standard.string(forKey: Self.serverKey) ?? ""
         savedHosts = UserDefaults.standard.stringArray(forKey: Self.hostsKey) ?? []

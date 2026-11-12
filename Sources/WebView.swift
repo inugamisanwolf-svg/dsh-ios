@@ -17,12 +17,21 @@ struct WebView: UIViewRepresentable {
         config.allowsInlineMediaPlayback = true
         config.mediaTypesRequiringUserActionForPlayback = []
 
+        // Diagnostics bridge: the page reports its own boot state and every JS/WS/fetch failure.
+        config.userContentController.add(context.coordinator, name: Coordinator.diagHandler)
+        config.userContentController.addUserScript(
+            WKUserScript(source: Coordinator.diagnosticsScript,
+                         injectionTime: .atDocumentStart,
+                         forMainFrameOnly: true)
+        )
+
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
         webView.uiDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = true
         webView.scrollView.contentInsetAdjustmentBehavior = .automatic
         webView.isOpaque = false
+        if #available(iOS 16.4, *) { webView.isInspectable = true }
         let bg = UIColor(red: 0.055, green: 0.062, blue: 0.075, alpha: 1)
         webView.backgroundColor = bg
         webView.scrollView.backgroundColor = bg
@@ -42,7 +51,69 @@ struct WebView: UIViewRepresentable {
         context.coordinator.load(url: url, ticket: ticket)
     }
 
-    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
+    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
+        static let diagHandler = "dshDiag"
+
+        /// Runs at documentStart, so it sees the very first script failure.
+        static let diagnosticsScript = """
+        (function () {
+          if (window.__dshDiagInstalled) { return; }
+          window.__dshDiagInstalled = true;
+          function send(kind, text) {
+            try { window.webkit.messageHandlers.dshDiag.postMessage(kind + ' | ' + text); } catch (e) {}
+          }
+          window.addEventListener('error', function (e) {
+            var t = e.target;
+            if (t && t !== window && (t.src || t.href)) {
+              send('resource', (t.tagName || '?') + ' ' + (t.src || t.href));
+              return;
+            }
+            send('error', (e.message || 'unknown') + ' @ ' + (e.filename || '') + ':' + (e.lineno || 0));
+          }, true);
+          window.addEventListener('unhandledrejection', function (e) {
+            var r = e.reason;
+            send('rejection', String(r && (r.stack || r.message || r)));
+          });
+          var origError = console.error;
+          console.error = function () {
+            try { send('console.error', Array.prototype.map.call(arguments, function (a) { return String(a); }).join(' ')); } catch (e) {}
+            return origError.apply(console, arguments);
+          };
+          var origFetch = window.fetch;
+          if (origFetch) {
+            window.fetch = function () {
+              var p = origFetch.apply(this, arguments);
+              p.then(function (r) { if (!r.ok) { send('fetch', r.status + ' ' + r.url); } },
+                     function (e) { send('fetch-fail', String(e)); });
+              return p;
+            };
+          }
+          var OrigWS = window.WebSocket;
+          if (OrigWS) {
+            function DiagWS(u, p) {
+              send('ws-open', String(u));
+              var s = p === undefined ? new OrigWS(u) : new OrigWS(u, p);
+              s.addEventListener('error', function () { send('ws-error', String(u)); });
+              s.addEventListener('close', function (e) { send('ws-close', String(u) + ' code=' + e.code + (e.reason ? (' ' + e.reason) : '')); });
+              s.addEventListener('open', function () { send('ws-ready', String(u)); });
+              return s;
+            }
+            DiagWS.prototype = OrigWS.prototype;
+            DiagWS.CONNECTING = 0; DiagWS.OPEN = 1; DiagWS.CLOSING = 2; DiagWS.CLOSED = 3;
+            window.WebSocket = DiagWS;
+          }
+          setTimeout(function () {
+            var root = document.getElementById('root') || document.body;
+            send('state',
+                 'children=' + (root ? root.children.length : -1) +
+                 ' scripts=' + document.scripts.length +
+                 ' boot=' + (typeof window.__DSH_BOOT__) +
+                 ' origin=' + location.origin +
+                 ' secure=' + window.isSecureContext);
+          }, 3500);
+        })();
+        """
+
         private let model: AppModel
         weak var webView: WKWebView?
         private var lastTicket: UUID?
@@ -56,13 +127,23 @@ struct WebView: UIViewRepresentable {
             guard let url else { return }
             if ticket == lastTicket { return }
             lastTicket = ticket
-            var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
-            request.setValue("DSHMobile/1.0 (iOS)", forHTTPHeaderField: "User-Agent")
+            let request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
             webView?.load(request)
         }
 
         @objc func handleRefresh(_ sender: UIRefreshControl) {
             webView?.reload()
+        }
+
+        // MARK: - Diagnostics
+
+        func userContentController(_ userContentController: WKUserContentController,
+                                   didReceive message: WKScriptMessage) {
+            guard message.name == Self.diagHandler else { return }
+            model.note(String(describing: message.body))
+            if let text = message.body as? String, text.hasPrefix("ws-ready") {
+                model.lastError = nil
+            }
         }
 
         // MARK: - Navigation policy
@@ -128,6 +209,7 @@ struct WebView: UIViewRepresentable {
         }
 
         func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            model.note("webcontent | process terminated, reloading")
             webView.reload()
         }
 
