@@ -57,7 +57,36 @@ dsh --profile web --host 192.168.0.200 --port 59714 --no-open
 
 - Cookie が切れた / 別端末 → 401 を検知してトークン入力シートが出る。新しい `?token=` を貼る。
 - ホストを止めた / 別 Wi-Fi → エラーカード（再試行 / 接続設定）。
-- 外出先 → PC 側を `--host 100.99.81.43`（Tailscale IP）で立てて、アプリの接続先をそれに変える。
+- 外出先 → 下の Tailscale 節。`dsh-serve.ps1 -Target both` で LAN と tailnet を同時に立てられる。
+
+## Tailscale 経由（外から）
+
+PC は tailnet 参加済み（`xl7c-r46` / `100.99.81.43` / `xl7c-r46.taileacb89.ts.net`）。tailnet は WireGuard なので平文 HTTP でも経路は暗号化される。
+
+```powershell
+pwsh -File dsh-serve.ps1 -Target both      # LAN 59714 + tailnet 59715
+# tailnet: http://100.99.81.43:59715/?token=...
+#      or  http://xl7c-r46.taileacb89.ts.net:59715/?token=...
+```
+
+- 束ね先が `100.99.81.43` なので、`Host` が bind IP と一致して trust fence を通る。MagicDNS 名で繋ぐ場合は `--trusted-host xl7c-r46.taileacb89.ts.net:59715` が付与される（スクリプトが自動で渡す）。
+- **Cookie は authority ごと**。`100.99.81.43:59715` で発行した Cookie は `xl7c-r46...ts.net:59715` では通らない（[実測] 401）。アプリの「保存済み」から同じ authority を選び直せば Cookie が再利用される。
+- iPhone 側は Tailscale アプリで同じアカウントにサインインして接続 ON。家でも外でも同じ `100.x` URL で入れる。
+
+## Windows ログオン時の自動起動
+
+スタートアップフォルダに 2 本置く（Task Scheduler の ONLOGON は管理者権限が必要なので、ユーザー単位のスタートアップを使う）。
+
+```powershell
+# LAN + tailnet を毎ログオンで自動起動（ショートカット作成）
+powershell -NoProfile -File C:\Users\kaito\Documents\deepseek-harness\dsh-serve.ps1 -InstallAutostart
+# 解除
+... -RemoveAutostart
+```
+
+- `DSH Web Serve.lnk` → `dsh-serve.ps1 -Target both`（hidden / Tailscale 起動待ち最大180s / ポート単位で冪等）
+- `DeepSeek Harness.lnk` → デスクトップアプリ本体
+- ON/OFF は 設定 → アプリ → スタートアップ、または タスクマネージャー → スタートアップ
 
 ## 構成
 

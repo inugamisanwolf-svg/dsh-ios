@@ -8,6 +8,14 @@ struct ConnectView: View {
 
     var isFirstRun: Bool = false
 
+    /// Shown in the footer so the installed build is identifiable on the device.
+    static var buildLabel: String {
+        let info = Bundle.main.infoDictionary
+        let short = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = info?["CFBundleVersion"] as? String ?? "?"
+        return "\(short) (\(build))"
+    }
+
     @State private var input: String = ""
     @State private var parseError: String?
 
@@ -87,7 +95,7 @@ struct ConnectView: View {
                         }
                     }
                 } footer: {
-                    Text("同じ Wi-Fi なら LAN の IP、外からなら Tailscale の IP（100.x.x.x）を選ぶ。PC 側は `dsh-serve.ps1 -Target both` で両方同時に立てられる。")
+                    Text("同じ Wi-Fi なら LAN の IP、外からなら Tailscale の IP（100.x.x.x）を選ぶ。PC 側は `dsh-serve.ps1 -Target both` で両方同時に立てられる。\nビルド \(Self.buildLabel)")
                 }
             }
             .navigationTitle(isFirstRun ? "DSH に接続" : "接続設定")
