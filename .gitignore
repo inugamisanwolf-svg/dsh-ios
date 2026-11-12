@@ -1,0 +1,16 @@
+# Xcode
+build/
+build.log
+DerivedData/
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+
+# Artifacts
+dist/
+Payload/
+*.ipa
+*.dSYM.zip
+
+# Local
+.DS_Store

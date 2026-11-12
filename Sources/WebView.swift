@@ -1,0 +1,159 @@
+import SwiftUI
+import WebKit
+import UIKit
+
+/// Thin WKWebView host. Keeps the harness inside the app, refreshable, and cookie-authenticated.
+struct WebView: UIViewRepresentable {
+    let url: URL?
+    let ticket: UUID
+    let model: AppModel
+
+    func makeCoordinator() -> Coordinator { Coordinator(model: model) }
+
+    func makeUIView(context: Context) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        config.websiteDataStore = .default()
+        config.defaultWebpagePreferences.allowsContentJavaScript = true
+        config.allowsInlineMediaPlayback = true
+        config.mediaTypesRequiringUserActionForPlayback = []
+
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.navigationDelegate = context.coordinator
+        webView.uiDelegate = context.coordinator
+        webView.allowsBackForwardNavigationGestures = true
+        webView.scrollView.contentInsetAdjustmentBehavior = .automatic
+        webView.isOpaque = false
+        let bg = UIColor(red: 0.055, green: 0.062, blue: 0.075, alpha: 1)
+        webView.backgroundColor = bg
+        webView.scrollView.backgroundColor = bg
+        webView.underPageBackgroundColor = bg
+
+        let refresh = UIRefreshControl()
+        refresh.tintColor = .lightGray
+        refresh.addTarget(context.coordinator, action: #selector(Coordinator.handleRefresh(_:)), for: .valueChanged)
+        webView.scrollView.refreshControl = refresh
+
+        context.coordinator.webView = webView
+        context.coordinator.load(url: url, ticket: ticket)
+        return webView
+    }
+
+    func updateUIView(_ webView: WKWebView, context: Context) {
+        context.coordinator.load(url: url, ticket: ticket)
+    }
+
+    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
+        private let model: AppModel
+        weak var webView: WKWebView?
+        private var lastTicket: UUID?
+
+        init(model: AppModel) {
+            self.model = model
+        }
+
+        /// Loads only when the ticket changes, so clearing the one-shot token never triggers a reload.
+        func load(url: URL?, ticket: UUID) {
+            guard let url else { return }
+            if ticket == lastTicket { return }
+            lastTicket = ticket
+            var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
+            request.setValue("DSHMobile/1.0 (iOS)", forHTTPHeaderField: "User-Agent")
+            webView?.load(request)
+        }
+
+        @objc func handleRefresh(_ sender: UIRefreshControl) {
+            webView?.reload()
+        }
+
+        // MARK: - Navigation policy
+
+        func webView(_ webView: WKWebView,
+                     decidePolicyFor navigationAction: WKNavigationAction,
+                     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            guard let target = navigationAction.request.url else {
+                decisionHandler(.allow)
+                return
+            }
+            let scheme = (target.scheme ?? "").lowercased()
+
+            if scheme != "http" && scheme != "https" {
+                if scheme == "about" || scheme == "data" || scheme == "blob" {
+                    decisionHandler(.allow)
+                } else {
+                    openExternally(target)
+                    decisionHandler(.cancel)
+                }
+                return
+            }
+
+            if let host = model.serverHost, let targetHost = target.host, targetHost != host {
+                openExternally(target)
+                decisionHandler(.cancel)
+                return
+            }
+            decisionHandler(.allow)
+        }
+
+        func webView(_ webView: WKWebView,
+                     decidePolicyFor navigationResponse: WKNavigationResponse,
+                     decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+            if let http = navigationResponse.response as? HTTPURLResponse, http.statusCode == 401 {
+                model.needsToken = true
+                decisionHandler(.cancel)
+                return
+            }
+            decisionHandler(.allow)
+        }
+
+        // MARK: - Completion
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            webView.scrollView.refreshControl?.endRefreshing()
+            model.lastError = nil
+            let hasTokenQuery = webView.url
+                .flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false) }?
+                .queryItems?
+                .contains(where: { $0.name == "token" }) ?? false
+            if !hasTokenQuery {
+                model.pendingToken = nil
+            }
+        }
+
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            report(error)
+        }
+
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            report(error)
+        }
+
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            webView.reload()
+        }
+
+        // MARK: - UI delegate
+
+        func webView(_ webView: WKWebView,
+                     createWebViewWith configuration: WKWebViewConfiguration,
+                     for navigationAction: WKNavigationAction,
+                     windowFeatures: WKWindowFeatures) -> WKWebView? {
+            if let target = navigationAction.request.url {
+                webView.load(URLRequest(url: target))
+            }
+            return nil
+        }
+
+        // MARK: - Helpers
+
+        private func report(_ error: Error) {
+            let ns = error as NSError
+            if ns.code == NSURLErrorCancelled { return }
+            webView?.scrollView.refreshControl?.endRefreshing()
+            model.lastError = "\(ns.localizedDescription) (code \(ns.code))"
+        }
+
+        private func openExternally(_ url: URL) {
+            UIApplication.shared.open(url, options: [:], completionHandler: nil)
+        }
+    }
+}
